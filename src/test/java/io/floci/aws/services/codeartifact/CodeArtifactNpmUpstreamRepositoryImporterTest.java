@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -53,13 +54,16 @@ class CodeArtifactNpmUpstreamRepositoryImporterTest {
 
     private CodeArtifactService service;
     private VerdaccioSidecarClient verdaccio;
+    private CodeArtifactNpmExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactNpmUpstreamRepositoryImporter importer;
 
     @BeforeEach
     void setUp() {
         service = mock(CodeArtifactService.class);
         verdaccio = mock(VerdaccioSidecarClient.class);
-        importer = new CodeArtifactNpmUpstreamRepositoryImporter(service, verdaccio, new ObjectMapper());
+        externalConnectionImporter = mock(CodeArtifactNpmExternalConnectionImporter.class);
+        importer = new CodeArtifactNpmUpstreamRepositoryImporter(service, verdaccio, new ObjectMapper(),
+                externalConnectionImporter);
 
         CodeArtifactRepository repository = new CodeArtifactRepository();
         repository.setUpstreams(List.of(UPSTREAM));
@@ -314,6 +318,64 @@ class CodeArtifactNpmUpstreamRepositoryImporterTest {
         assertEquals(BASE_URL + PACKAGE_NAME + "/-/" + ASSET_NAME, versionDoc.path("dist").path("tarball").asText());
         assertEquals(VERSION, merged.get().path("dist-tags").path("latest").asText());
         verify(verdaccio).endUse(UPSTREAM_REPO_ID);
+    }
+
+    /**
+     * A version no upstream holds is fetched through an upstream's own external connection, retained
+     * there first, then retained here from that upstream, as the User Guide's chain example has it.
+     */
+    @Test
+    void aVersionNoUpstreamHoldsIsFetchedThroughAnUpstreamsExternalConnection() {
+        when(verdaccio.packageVersionExists(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_NAME, VERSION))
+                .thenReturn(false);
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.tryImportAsset(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, null,
+                PACKAGE_NAME, VERSION, ASSET_NAME)).thenReturn(true);
+        when(verdaccio.fetchPackageDocument(UPSTREAM_BASE_URL, null, PACKAGE_NAME))
+                .thenReturn(Optional.of(upstreamDocument("")));
+        byte[] tarballBytes = "tarball-content".getBytes();
+        when(verdaccio.fetchPackageVersionAssetStreamed(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_NAME,
+                VERSION, ASSET_NAME)).thenAnswer(invocation -> Optional.of(new RepositorySidecarManager.StreamedAsset(
+                        new ByteArrayInputStream(tarballBytes), tarballBytes.length)));
+
+        boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
+                VERSION, ASSET_NAME);
+
+        assertTrue(imported);
+        verify(externalConnectionImporter).tryImportAsset(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, null,
+                PACKAGE_NAME, VERSION, ASSET_NAME);
+        verify(service).claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME,
+                VERSION, UPSTREAM, RetentionOriginKind.UPSTREAM_REPOSITORY, 42L);
+        // Leased once by the walk and once for the fetch through its connection, each released.
+        verify(service, times(2)).resolveContainerIdAndBeginUse("npm", REGION, DOMAIN, OWNER, UPSTREAM, verdaccio);
+        verify(verdaccio, times(2)).endUse(UPSTREAM_REPO_ID);
+    }
+
+    @Test
+    void anUpstreamWithoutAnExternalConnectionIsNotAskedToFetch() {
+        when(verdaccio.packageVersionExists(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_NAME, VERSION))
+                .thenReturn(false);
+
+        assertFalse(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
+                VERSION, ASSET_NAME));
+        verify(externalConnectionImporter, never()).tryImportAsset(anyString(), anyString(), anyString(),
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void mergedPackumentOffersWhatAnUpstreamsExternalConnectionHas() {
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.mergedPackument(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, null,
+                PACKAGE_NAME, false)).thenReturn(Optional.of((ObjectNode) upstreamDocument("")));
+        when(verdaccio.fetchPackageDocument(BASE_URL, null, PACKAGE_NAME)).thenReturn(Optional.empty());
+
+        Optional<ObjectNode> merged = importer.mergedPackument(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null,
+                PACKAGE_NAME);
+
+        assertTrue(merged.isPresent());
+        assertEquals(BASE_URL + PACKAGE_NAME + "/-/" + ASSET_NAME,
+                merged.get().path("versions").path(VERSION).path("dist").path("tarball").asText());
+        verify(verdaccio, never()).fetchPackageDocument(UPSTREAM_BASE_URL, null, PACKAGE_NAME);
     }
 
     @Test

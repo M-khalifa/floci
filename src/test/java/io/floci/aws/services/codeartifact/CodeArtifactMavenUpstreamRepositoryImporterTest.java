@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,13 +53,15 @@ class CodeArtifactMavenUpstreamRepositoryImporterTest {
 
     private CodeArtifactService service;
     private ReposiliteSidecarClient reposilite;
+    private CodeArtifactMavenExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactMavenUpstreamRepositoryImporter importer;
 
     @BeforeEach
     void setUp() {
         service = mock(CodeArtifactService.class);
         reposilite = mock(ReposiliteSidecarClient.class);
-        importer = new CodeArtifactMavenUpstreamRepositoryImporter(service, reposilite);
+        externalConnectionImporter = mock(CodeArtifactMavenExternalConnectionImporter.class);
+        importer = new CodeArtifactMavenUpstreamRepositoryImporter(service, reposilite, externalConnectionImporter);
 
         CodeArtifactRepository repository = new CodeArtifactRepository();
         repository.setUpstreams(List.of(UPSTREAM));
@@ -296,6 +299,53 @@ class CodeArtifactMavenUpstreamRepositoryImporterTest {
                 anyString(), anyString(), anyString(), anyString(), anyLong());
         verify(service).finishMavenRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, NAMESPACE,
                 PACKAGE_NAME, VERSION, EPISODE_ID, false);
+    }
+
+    /**
+     * An artifact no upstream holds is fetched through an upstream's own external connection, retained
+     * there first, then retained here from that upstream.
+     */
+    @Test
+    void anArtifactNoUpstreamHoldsIsFetchedThroughAnUpstreamsExternalConnection() {
+        when(reposilite.artifactExists(UPSTREAM_REPO_ID, GAV)).thenReturn(false);
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.tryImport(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, GAV))
+                .thenReturn(true);
+        stubFetchArtifact(UPSTREAM_REPO_ID, GAV, "jar-bytes".getBytes());
+
+        assertTrue(importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, GAV));
+        verify(externalConnectionImporter).tryImport(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, GAV);
+        verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, NAMESPACE, PACKAGE_NAME,
+                VERSION, UPSTREAM, RetentionOriginKind.UPSTREAM_REPOSITORY, 42L);
+        // Leased once by the walk and once for the fetch through its connection, each released.
+        verify(service, times(2)).resolveContainerIdAndBeginUse("maven", REGION, DOMAIN, OWNER, UPSTREAM, reposilite);
+        verify(reposilite, times(2)).endUse(UPSTREAM_REPO_ID);
+    }
+
+    @Test
+    void anUpstreamWithoutAnExternalConnectionIsNotAskedToFetch() {
+        when(reposilite.artifactExists(UPSTREAM_REPO_ID, GAV)).thenReturn(false);
+
+        assertFalse(importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, GAV));
+        verify(externalConnectionImporter, never()).tryImport(anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    void anUpstreamsExternalConnectionMergesItsReleasesIntoTheMetadataReadThroughIt() {
+        String metadataGav = "com/example/widget/maven-metadata.xml";
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        byte[] metadataBytes = METADATA_WITH_ONE_VERSION;
+        when(reposilite.fetchArtifactStreamed(UPSTREAM_REPO_ID, metadataGav)).thenAnswer(invocation ->
+                Optional.of(new ReposiliteSidecarClient.StreamedArtifact(
+                        new ByteArrayInputStream(metadataBytes), metadataBytes.length, "text/xml")));
+        when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq(NAMESPACE), eq(PACKAGE_NAME), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(),
+                eq(true))).thenReturn(true);
+
+        assertTrue(importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, metadataGav));
+        verify(externalConnectionImporter).tryImport(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID,
+                metadataGav);
     }
 
     /** Names at least one real version, so the eligibility pre-check lets this candidate through. */

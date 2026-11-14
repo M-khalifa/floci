@@ -2636,6 +2636,63 @@ class CodeArtifactServiceTest {
                 "repo", "maven", "com.example", "widget", "1.0"));
     }
 
+    /** Retains npm {@code widget@1.0} into {@code repository} from {@code origin}, a connection or a repository. */
+    private void retainNpmWidget(String repository, String origin, RetentionOriginKind kind) {
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, repository, "npm", null,
+                "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, repository, "npm", null, "widget", "1.0", origin, kind, fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, repository, "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+    }
+
+    private CodeArtifactService.PackageVersionSummary listedNpmWidget(String repository) {
+        when(verdaccioClient.listPackageVersions(anyString(), eq("dom"), eq(repository), isNull(), eq("widget")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0",
+                        Instant.ofEpochSecond(1000))));
+        return service.listPackageVersions(REGION, "dom", null, repository, "npm", null, "widget", null, null, null,
+                null, null).versions().get(0);
+    }
+
+    /**
+     * A version's origin names where it "originally entered" the domain: one retained through an
+     * upstream that had itself retained it from a repository further up names that repository, not
+     * the upstream it was read through.
+     */
+    @Test
+    void aVersionRetainedThroughAnIntermediateUpstreamNamesTheRepositoryItWasPublishedTo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("origin", "mid", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("mid", "origin", RetentionOriginKind.UPSTREAM_REPOSITORY);
+        retainNpmWidget("repo", "mid", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals("origin", summary.upstreamRepositoryName());
+        assertEquals(null, summary.externalConnectionName());
+        assertEquals("origin", listedNpmWidget("mid").upstreamRepositoryName());
+    }
+
+    /** One an upstream fetched through its external connection entered the domain there, so it is EXTERNAL. */
+    @Test
+    void aVersionRetainedThroughAnUpstreamThatFetchedItExternallyIsExternal() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("up", "public:npmjs", RetentionOriginKind.EXTERNAL_CONNECTION);
+        retainNpmWidget("repo", "up", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("EXTERNAL", summary.originType());
+        assertEquals("public:npmjs", summary.externalConnectionName());
+        assertEquals(null, summary.upstreamRepositoryName());
+        assertEquals(Optional.of("up"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "repo", "npm",
+                null, "widget", "1.0"));
+    }
+
     /**
      * {@code originType} stays {@code "INTERNAL"} for a same-domain upstream-repository retention
      * (real AWS's own {@code PackageVersionOrigin.originType} has no third value for this), with

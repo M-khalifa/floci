@@ -22,9 +22,13 @@ import java.util.Optional;
  * <ul>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first, matching AWS's own documented "Upstream
- *   repository priority order." The first candidate with the requested version wins; it may be
- *   several hops deep, not necessarily a direct upstream of {@code repository} itself.</li>
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first,
+ *   matching AWS's own documented "Upstream repository priority order." The first candidate with
+ *   the requested version wins; it may be several hops deep, not necessarily a direct upstream of
+ *   {@code repository} itself.</li>
+ *   <li><b>Through an upstream's external connection.</b> A version no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>Archived/Disposed propagation.</b> A candidate's own copy of the version must still be
  *   downloadable there (checked via {@link
  *   CodeArtifactService#requireContainerBackedVersionDownloadable}): an Archived or Disposed
@@ -40,11 +44,14 @@ public class CodeArtifactNuGetUpstreamRepositoryImporter {
 
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
+    private final CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter;
 
     @Inject
-    public CodeArtifactNuGetUpstreamRepositoryImporter(CodeArtifactService service, BagetterSidecarClient bagetter) {
+    public CodeArtifactNuGetUpstreamRepositoryImporter(CodeArtifactService service, BagetterSidecarClient bagetter,
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.bagetter = bagetter;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -105,6 +112,36 @@ public class CodeArtifactNuGetUpstreamRepositoryImporter {
             } finally {
                 if (!eligible) {
                     bagetter.endUse(candidateRepoId);
+                }
+            }
+        }
+        if (upstreamRepository == null) {
+            // No upstream holds the version: AWS fetches it through an upstream's external
+            // connection, in the same order, retained there and then here.
+            for (String candidate : service.resolveUpstreamSearchOrder(region, domain, owner, repository)) {
+                if (!externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate)) {
+                    continue;
+                }
+                String candidateRepoId;
+                try {
+                    candidateRepoId = service.resolveContainerIdAndBeginUse("nuget", region, domain, owner, candidate,
+                            bagetter);
+                } catch (RuntimeException e) {
+                    continue;
+                }
+                boolean fetched = false;
+                try {
+                    fetched = externalConnectionImporter.tryImport(region, domain, owner, candidate, candidateRepoId,
+                            packageId, version);
+                } finally {
+                    if (!fetched) {
+                        bagetter.endUse(candidateRepoId);
+                    }
+                }
+                if (fetched) {
+                    upstreamRepository = candidate;
+                    upstreamRepoId = candidateRepoId;
+                    break;
                 }
             }
         }

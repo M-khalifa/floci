@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,13 +51,15 @@ class CodeArtifactNuGetUpstreamRepositoryImporterTest {
 
     private CodeArtifactService service;
     private BagetterSidecarClient bagetter;
+    private CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactNuGetUpstreamRepositoryImporter importer;
 
     @BeforeEach
     void setUp() {
         service = mock(CodeArtifactService.class);
         bagetter = mock(BagetterSidecarClient.class);
-        importer = new CodeArtifactNuGetUpstreamRepositoryImporter(service, bagetter);
+        externalConnectionImporter = mock(CodeArtifactNuGetExternalConnectionImporter.class);
+        importer = new CodeArtifactNuGetUpstreamRepositoryImporter(service, bagetter, externalConnectionImporter);
 
         CodeArtifactRepository repository = new CodeArtifactRepository();
         repository.setUpstreams(List.of(UPSTREAM));
@@ -92,6 +95,38 @@ class CodeArtifactNuGetUpstreamRepositoryImporterTest {
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
                 any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
+    }
+
+    /**
+     * A version no upstream holds is fetched through an upstream's own external connection, retained
+     * there first, then retained here from that upstream.
+     */
+    @Test
+    void aVersionNoUpstreamHoldsIsFetchedThroughAnUpstreamsExternalConnection() {
+        when(bagetter.packageVersionExists(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_ID, VERSION))
+                .thenReturn(false);
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.tryImport(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, PACKAGE_ID,
+                VERSION)).thenReturn(true);
+
+        assertTrue(importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION));
+        verify(externalConnectionImporter).tryImport(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, PACKAGE_ID,
+                VERSION);
+        verify(service).claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null, PACKAGE_ID,
+                VERSION, UPSTREAM, RetentionOriginKind.UPSTREAM_REPOSITORY, 42L);
+        // Leased once by the walk and once for the fetch through its connection, each released.
+        verify(service, times(2)).resolveContainerIdAndBeginUse("nuget", REGION, DOMAIN, OWNER, UPSTREAM, bagetter);
+        verify(bagetter, times(2)).endUse(UPSTREAM_REPO_ID);
+    }
+
+    @Test
+    void anUpstreamWithoutAnExternalConnectionIsNotAskedToFetch() {
+        when(bagetter.packageVersionExists(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_ID, VERSION))
+                .thenReturn(false);
+
+        assertFalse(importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION));
+        verify(externalConnectionImporter, never()).tryImport(anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
     }
 
     @Test

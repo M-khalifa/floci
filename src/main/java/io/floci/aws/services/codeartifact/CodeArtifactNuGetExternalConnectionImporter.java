@@ -191,6 +191,11 @@ public class CodeArtifactNuGetExternalConnectionImporter {
         }
     }
 
+    /** Whether {@code repository} has a NuGet external connection to fetch through. */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        return nugetExternalConnectionName(region, domain, owner, repository) != null;
+    }
+
     private String nugetExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "nuget".equals(ec.getPackageFormat()))

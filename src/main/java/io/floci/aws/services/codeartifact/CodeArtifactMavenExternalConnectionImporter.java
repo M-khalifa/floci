@@ -372,6 +372,11 @@ public class CodeArtifactMavenExternalConnectionImporter {
                 false);
     }
 
+    /** Whether {@code repository} has a Maven external connection to fetch through. */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        return mavenExternalConnectionName(region, domain, owner, repository) != null;
+    }
+
     private String mavenExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "maven".equals(ec.getPackageFormat()))

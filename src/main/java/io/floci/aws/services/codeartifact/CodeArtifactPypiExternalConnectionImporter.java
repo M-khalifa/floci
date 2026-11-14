@@ -583,6 +583,11 @@ public class CodeArtifactPypiExternalConnectionImporter {
                 .findFirst();
     }
 
+    /** Whether {@code repository} has a PyPI external connection to fetch through. */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        return pypiExternalConnectionName(region, domain, owner, repository) != null;
+    }
+
     private String pypiExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "pypi".equals(ec.getPackageFormat()))

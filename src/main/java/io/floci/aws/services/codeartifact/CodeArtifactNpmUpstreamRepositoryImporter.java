@@ -39,8 +39,12 @@ import java.util.Optional;
  *   source.</li>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first. The first candidate whose own packument names the
- *   requested version wins; it may be several hops deep.</li>
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first.
+ *   The first candidate whose own packument names the requested version wins; it may be several
+ *   hops deep.</li>
+ *   <li><b>Through an upstream's external connection.</b> A version no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>Archived/Disposed propagation.</b> A candidate's own copy of the version must still be
  *   downloadable there (checked via {@link
  *   CodeArtifactService#requireContainerBackedVersionDownloadable}): the walk skips an Archived or
@@ -59,13 +63,15 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
     private final CodeArtifactService service;
     private final VerdaccioSidecarClient verdaccio;
     private final ObjectMapper mapper;
+    private final CodeArtifactNpmExternalConnectionImporter externalConnectionImporter;
 
     @Inject
     public CodeArtifactNpmUpstreamRepositoryImporter(CodeArtifactService service, VerdaccioSidecarClient verdaccio,
-            ObjectMapper mapper) {
+            ObjectMapper mapper, CodeArtifactNpmExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.verdaccio = verdaccio;
         this.mapper = mapper;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -98,7 +104,14 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
             try {
                 String candidateBaseUrl = verdaccio.ensureReady(candidateRepoId,
                         verdaccio.publicUrl(domain, candidate));
-                JsonNode external = verdaccio.fetchPackageDocument(candidateBaseUrl, namespace, packageName)
+                // A candidate with an external connection offers what that connection has too, as
+                // a request to it would: a version it has not fetched yet is fetched there first.
+                JsonNode external = (externalConnectionImporter.hasExternalConnection(region, domain, owner,
+                        candidate)
+                        ? externalConnectionImporter.mergedPackument(region, domain, owner, candidate,
+                                candidateRepoId, namespace, packageName, false).<JsonNode>map(merged -> merged)
+                        : Optional.<JsonNode>empty())
+                        .or(() -> verdaccio.fetchPackageDocument(candidateBaseUrl, namespace, packageName))
                         .orElse(null);
                 if (external == null) {
                     continue;
@@ -239,6 +252,36 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
             } finally {
                 if (!eligible) {
                     verdaccio.endUse(candidateRepoId);
+                }
+            }
+        }
+        if (upstreamRepository == null) {
+            // No upstream holds the version: AWS fetches it through an upstream's external
+            // connection, in the same order, retained there and then here.
+            for (String candidate : service.resolveUpstreamSearchOrder(region, domain, owner, repository)) {
+                if (!externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate)) {
+                    continue;
+                }
+                String candidateRepoId;
+                try {
+                    candidateRepoId = service.resolveContainerIdAndBeginUse("npm", region, domain, owner, candidate,
+                            verdaccio);
+                } catch (RuntimeException e) {
+                    continue;
+                }
+                boolean fetched = false;
+                try {
+                    fetched = externalConnectionImporter.tryImportAsset(region, domain, owner, candidate,
+                            candidateRepoId, namespace, packageName, version, assetName);
+                } finally {
+                    if (!fetched) {
+                        verdaccio.endUse(candidateRepoId);
+                    }
+                }
+                if (fetched) {
+                    upstreamRepository = candidate;
+                    upstreamRepoId = candidateRepoId;
+                    break;
                 }
             }
         }

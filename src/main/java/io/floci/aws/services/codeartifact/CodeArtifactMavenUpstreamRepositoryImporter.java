@@ -26,11 +26,15 @@ import java.util.function.Predicate;
  * <ul>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first, matching AWS's own documented "Upstream
- *   repository priority order." The first candidate with the requested asset wins; it may be
- *   several hops deep, not necessarily a direct upstream of {@code repository} itself. Reposilite
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first,
+ *   matching AWS's own documented "Upstream repository priority order." The first candidate with
+ *   the requested asset wins; it may be several hops deep, not necessarily a direct upstream of
+ *   {@code repository} itself. Reposilite
  *   scopes entirely by its own {@code repoId}, never by path, so the same {@code gav} string is
  *   checked against each candidate's own id in turn.</li>
+ *   <li><b>Through an upstream's external connection.</b> A artifact no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>No SNAPSHOT exclusion.</b> The external-connection importer's "release versions only"
  *   rule is AWS's own documented restriction for a real public registry, which never has a
  *   Floci-internal SNAPSHOT concept at all; nothing says the same for a same-domain upstream, and
@@ -56,12 +60,14 @@ public class CodeArtifactMavenUpstreamRepositoryImporter {
 
     private final CodeArtifactService service;
     private final ReposiliteSidecarClient reposilite;
+    private final CodeArtifactMavenExternalConnectionImporter externalConnectionImporter;
 
     @Inject
-    public CodeArtifactMavenUpstreamRepositoryImporter(CodeArtifactService service,
-            ReposiliteSidecarClient reposilite) {
+    public CodeArtifactMavenUpstreamRepositoryImporter(CodeArtifactService service, ReposiliteSidecarClient reposilite,
+            CodeArtifactMavenExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.reposilite = reposilite;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -127,6 +133,36 @@ public class CodeArtifactMavenUpstreamRepositoryImporter {
             } finally {
                 if (!eligible) {
                     reposilite.endUse(candidateRepoId);
+                }
+            }
+        }
+        if (upstreamRepository == null) {
+            // No upstream holds the artifact: AWS fetches it through an upstream's external
+            // connection, in the same order, retained there and then here.
+            for (String candidate : service.resolveUpstreamSearchOrder(region, domain, owner, repository)) {
+                if (!externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate)) {
+                    continue;
+                }
+                String candidateRepoId;
+                try {
+                    candidateRepoId = service.resolveContainerIdAndBeginUse("maven", region, domain, owner, candidate,
+                            reposilite);
+                } catch (RuntimeException e) {
+                    continue;
+                }
+                boolean fetched = false;
+                try {
+                    fetched = externalConnectionImporter.tryImport(region, domain, owner, candidate, candidateRepoId,
+                            gav);
+                } finally {
+                    if (!fetched) {
+                        reposilite.endUse(candidateRepoId);
+                    }
+                }
+                if (fetched) {
+                    upstreamRepository = candidate;
+                    upstreamRepoId = candidateRepoId;
+                    break;
                 }
             }
         }
@@ -277,6 +313,12 @@ public class CodeArtifactMavenUpstreamRepositoryImporter {
             // within this same candidate's lease), so it is always released before moving on,
             // whether this candidate won or not.
             try {
+                // A candidate with an external connection offers what that connection has too, as a
+                // request to it would: the public releases are merged into its metadata first.
+                if (externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate)) {
+                    externalConnectionImporter.tryImport(region, domain, owner, candidate, candidateRepoId,
+                            metadataGav);
+                }
                 Optional<ReposiliteSidecarClient.StreamedArtifact> fetched;
                 try {
                     fetched = reposilite.fetchArtifactStreamed(candidateRepoId, metadataGav);

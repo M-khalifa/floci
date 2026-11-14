@@ -416,6 +416,11 @@ public class CodeArtifactNpmExternalConnectionImporter {
         return packageName + "-" + version + ".tgz";
     }
 
+    /** Whether {@code repository} has an npm external connection to fetch through. */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        return npmExternalConnectionName(region, domain, owner, repository) != null;
+    }
+
     private String npmExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "npm".equals(ec.getPackageFormat()))
