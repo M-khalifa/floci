@@ -2,6 +2,7 @@ package io.floci.aws.services.sqs;
 
 import io.floci.aws.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
@@ -1057,6 +1058,17 @@ class SqsServiceTest {
         assertEquals("group1", msg.getMessageGroupId());
         assertTrue(msg.getSequenceNumber() > 0);
         assertNotNull(msg.getMessageDeduplicationId());
+    }
+
+    @Test
+    void receiveMessageFromContentBasedFifoQueueExposesSha256OfBodyAsDeduplicationId() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sha.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "Hello FIFO", 0, "group1", null, region);
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        assertEquals(Digests.sha256Hex("Hello FIFO"), received.get(0).getMessageDeduplicationId());
     }
 
     @Test
