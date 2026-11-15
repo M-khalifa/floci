@@ -1249,6 +1249,7 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
         replica.setLastChangedDate(primary.getLastChangedDate());
         replica.setLastRotatedDate(primary.getLastRotatedDate());
         replica.setRotationEnabled(primary.isRotationEnabled());
+        replica.setRotationConfigured(primary.isRotationConfigured());
         replica.setRotationLambdaArn(primary.getRotationLambdaArn());
         replica.setRotationRules(primary.getRotationRules());
         replica.setNextRotationDate(primary.getNextRotationDate());
